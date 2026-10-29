@@ -126,6 +126,7 @@ fn main() -> Result<(), EspError> {
 
     loop {
         FreeRtos::delay_ms(50);
+
         contador += 1;
         if contador == 20 {
             contador = 0;
@@ -197,17 +198,17 @@ fn main() -> Result<(), EspError> {
             match m {
                 AJUSTAR_HOR => {
                     let mut h = HORA.load(Ordering::Relaxed);
-                    h = (h - 1 + 24) % 24;
+                    h = (h + 23) % 24;
                     HORA.store(h, Ordering::Relaxed);
                 }
                 AJUSTAR_MIN => {
                     let mut m = MINUTO.load(Ordering::Relaxed);
-                    m = (m - 1 + 60) % 60;
+                    m = (m + 59) % 60;
                     MINUTO.store(m, Ordering::Relaxed);
                 }
                 AJUSTAR_SEG => {
                     let mut s = SEGUNDO.load(Ordering::Relaxed);
-                    s = (s - 1 + 60) % 60;
+                    s = (s + 59) % 60;
                     SEGUNDO.store(s, Ordering::Relaxed);
                 }
                 _ => {}
