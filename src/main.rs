@@ -4,7 +4,9 @@ use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::gpio::{InterruptType, PinDriver, Pull};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::sys::EspError;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+use std::thread;
 
 use lcd::Lcd;
 
@@ -19,6 +21,14 @@ static BOTON_2_PRESIONADO: AtomicBool = AtomicBool::new(false);
 static BOTON_3_PRESIONADO: AtomicBool = AtomicBool::new(false);
 static BOTON_4_PRESIONADO: AtomicBool = AtomicBool::new(false);
 
+// Variables atómicas compartidas entre la tarea de botones y la tarea del reloj/pantalla
+static MODO: AtomicU8 = AtomicU8::new(0);
+static HORA: AtomicU8 = AtomicU8::new(12);
+static MINUTO: AtomicU8 = AtomicU8::new(30);
+static SEGUNDO: AtomicU8 = AtomicU8::new(45);
+
+static ACTUALIZAR_LCD: AtomicBool = AtomicBool::new(false);
+
 fn main() -> Result<(), EspError> {
     // It is necessary to call this function once. Otherwise, some patches to the runtime
     // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
@@ -28,10 +38,6 @@ fn main() -> Result<(), EspError> {
     esp_idf_svc::log::EspLogger::initialize_default();
 
     log::info!("Hello, world!");
-
-    let mut hor: u8 = 16;
-    let mut min: u8 = 30;
-    let mut seg: u8 = 15;
 
     let peripherals = Peripherals::take()?;
 
@@ -77,14 +83,44 @@ fn main() -> Result<(), EspError> {
     lcd.clear()?;
     log::info!("LCD inicializada correctamente.");
 
-    let mut modo: u8 = NORMAL;
+    thread::Builder::new()
+        .name("tarea_lcd".to_string())
+        .stack_size(4096)
+        .spawn(move || {
+            log::info!("Tarea de escritura en la LCD inicializada correctamente.");
+            loop {
+                if ACTUALIZAR_LCD.swap(false, Ordering::Relaxed) {
+                    let h = HORA.load(Ordering::Relaxed);
+                    let m = MINUTO.load(Ordering::Relaxed);
+                    let s = SEGUNDO.load(Ordering::Relaxed);
 
-    lcd.set_cursor(0, 0)?;
-    let tiempo = format!("Hora:   {:02}:{:02}:{:02}", hor, min, seg);
-    write!(&mut lcd, "{}", tiempo)?;
+                    lcd.set_cursor(0, 0).unwrap();
+                    let tiempo = format!("Hora:   {:02}:{:02}:{:02}", h, m, s);
+                    write!(&mut lcd, "{}", tiempo).unwrap();
 
-    lcd.set_cursor(0, 1)?;
-    write!(&mut lcd, "Modo:   NORMAL")?;
+                    lcd.set_cursor(0, 1).unwrap();
+                    let m = MODO.load(Ordering::Relaxed);
+
+                    match m {
+                        NORMAL => {
+                            write!(&mut lcd, "Modo:   NORMAL").unwrap();
+                        }
+                        AJUSTAR_HOR => {
+                            write!(&mut lcd, "Modo:   HOR   ").unwrap();
+                        }
+                        AJUSTAR_MIN => {
+                            write!(&mut lcd, "Modo:   MIN   ").unwrap();
+                        }
+                        _ => {
+                            write!(&mut lcd, "Modo:   SEG   ").unwrap();
+                        }
+                    }
+                }
+
+                FreeRtos::delay_ms(100);
+            }
+        })
+        .expect("Error al iniciar la tarea de la LCD");
 
     let mut contador = 0;
 
@@ -93,103 +129,99 @@ fn main() -> Result<(), EspError> {
         contador += 1;
         if contador == 20 {
             contador = 0;
-            seg += 1;
-            if seg == 60 {
-                seg = 0;
-                min += 1;
-                if min == 60 {
-                    min = 0;
-                    hor += 1;
-                    if hor == 24 {
-                        hor = 0;
+
+            let mut h = HORA.load(Ordering::Relaxed);
+            let mut m = MINUTO.load(Ordering::Relaxed);
+            let mut s = SEGUNDO.load(Ordering::Relaxed);
+
+            s += 1;
+            if s == 60 {
+                s = 0;
+                m += 1;
+                if m == 60 {
+                    m = 0;
+                    h += 1;
+                    if h == 24 {
+                        h = 0;
                     }
                 }
             }
 
-            log::info!("{:02}:{:02}:{:02}", hor, min, seg);
-            lcd.set_cursor(0, 0)?;
-            let tiempo = format!("Hora:   {:02}:{:02}:{:02}", hor, min, seg);
-            write!(&mut lcd, "{}", tiempo)?;
+            HORA.store(h, Ordering::Relaxed);
+            MINUTO.store(m, Ordering::Relaxed);
+            SEGUNDO.store(s, Ordering::Relaxed);
+
+            log::info!("{:02}:{:02}:{:02}", h, m, s);
+            ACTUALIZAR_LCD.store(true, Ordering::Relaxed);
         }
 
         if BOTON_1_PRESIONADO.swap(false, Ordering::Relaxed) {
-            modo = (modo + 1) % 4;
-            lcd.set_cursor(0, 1)?;
+            let mut m = MODO.load(Ordering::Relaxed);
 
-            match modo {
-                NORMAL => {
-                    write!(&mut lcd, "Modo:   NORMAL")?;
-                }
-                AJUSTAR_HOR => {
-                    write!(&mut lcd, "Modo:   HOR   ")?;
-                }
-                AJUSTAR_MIN => {
-                    write!(&mut lcd, "Modo:   MIN   ")?;
-                }
-                _ => {
-                    write!(&mut lcd, "Modo:   SEG   ")?;
-                }
-            }
+            m = (m + 1) % 4;
+
+            MODO.store(m, Ordering::Relaxed);
+
             FreeRtos::delay_ms(150);
             boton1.enable_interrupt()?;
+            ACTUALIZAR_LCD.store(true, Ordering::Relaxed);
         }
 
         if BOTON_2_PRESIONADO.swap(false, Ordering::Relaxed) {
-            match modo {
+            let m = MODO.load(Ordering::Relaxed);
+            match m {
                 AJUSTAR_HOR => {
-                    hor = (hor + 1) % 24;
-                    lcd.set_cursor(8, 0)?;
-                    write!(&mut lcd, "{}", hor)?;
+                    let mut h = HORA.load(Ordering::Relaxed);
+                    h = (h + 1) % 24;
+                    HORA.store(h, Ordering::Relaxed);
                 }
                 AJUSTAR_MIN => {
-                    min = (min + 1) % 60;
-                    lcd.set_cursor(11, 0)?;
-                    write!(&mut lcd, "{}", min)?;
+                    let mut m = MINUTO.load(Ordering::Relaxed);
+                    m = (m + 1) % 60;
+                    MINUTO.store(m, Ordering::Relaxed);
                 }
                 AJUSTAR_SEG => {
-                    seg = (seg + 1) % 60;
-                    lcd.set_cursor(14, 0)?;
-                    write!(&mut lcd, "{}", seg)?;
+                    let mut s = SEGUNDO.load(Ordering::Relaxed);
+                    s = (s + 1) % 60;
+                    SEGUNDO.store(s, Ordering::Relaxed);
                 }
                 _ => {}
             }
             FreeRtos::delay_ms(150);
             boton2.enable_interrupt()?;
+            ACTUALIZAR_LCD.store(true, Ordering::Relaxed);
         }
 
         if BOTON_3_PRESIONADO.swap(false, Ordering::Relaxed) {
-            match modo {
+            let m = MODO.load(Ordering::Relaxed);
+            match m {
                 AJUSTAR_HOR => {
-                    if hor > 0 {
-                        hor -= 1;
-                    } else {
-                        hor = 23;
-                    }
-                    lcd.set_cursor(8, 0)?;
-                    write!(&mut lcd, "{}", hor)?;
+                    let mut h = HORA.load(Ordering::Relaxed);
+                    h = (h - 1 + 24) % 24;
+                    HORA.store(h, Ordering::Relaxed);
                 }
                 AJUSTAR_MIN => {
-                    if min > 0 {
-                        min -= 1;
-                    } else {
-                        min = 59;
-                    }
-                    lcd.set_cursor(11, 0)?;
-                    write!(&mut lcd, "{}", min)?;
+                    let mut m = MINUTO.load(Ordering::Relaxed);
+                    m = (m - 1 + 60) % 60;
+                    MINUTO.store(m, Ordering::Relaxed);
                 }
                 AJUSTAR_SEG => {
-                    if seg > 0 {
-                        seg -= 1;
-                    } else {
-                        seg = 59;
-                    }
-                    lcd.set_cursor(14, 0)?;
-                    write!(&mut lcd, "{}", seg)?;
+                    let mut s = SEGUNDO.load(Ordering::Relaxed);
+                    s = (s - 1 + 60) % 60;
+                    SEGUNDO.store(s, Ordering::Relaxed);
                 }
                 _ => {}
             }
             FreeRtos::delay_ms(150);
             boton3.enable_interrupt()?;
+            ACTUALIZAR_LCD.store(true, Ordering::Relaxed);
+        }
+
+        if BOTON_4_PRESIONADO.swap(false, Ordering::Relaxed) {
+            MODO.store(NORMAL, Ordering::Relaxed);
+            FreeRtos::delay_ms(150);
+            boton4.enable_interrupt()?;
+            ACTUALIZAR_LCD.store(true, Ordering::Relaxed);
         }
     }
 }
